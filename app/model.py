@@ -1,25 +1,53 @@
 import torch
 import torch.nn as nn
-from torchvision import models, transforms
+import torch.nn.functional as F
 from PIL import Image
 import io
+import torchvision.transforms as transforms
 
-# Load pre-trained MobileNetV2 for fast, lightweight inference
-model = models.mobilenet_v2(weights=models.MobileNet_V2_Weights.DEFAULT)
+# Define the exact CNN architecture specified in Practice 1
+class CNNClassifier(nn.Module):
+    def __init__(self, num_classes=10):
+        super(CNNClassifier, self).__init__()
+        # Input: 64x64x3
+        # Conv1: 16 filters, 3x3, stride 1, padding 1 -> 64x64x16
+        self.conv1 = nn.Conv2d(in_channels=3, out_channels=16, kernel_size=3, stride=1, padding=1)
+        self.pool1 = nn.MaxPool2d(kernel_size=2, stride=2)  # -> 32x32x16
+        
+        # Conv2: 32 filters, 3x3, stride 1, padding 1 -> 32x32x32
+        self.conv2 = nn.Conv2d(in_channels=16, out_channels=32, kernel_size=3, stride=1, padding=1)
+        self.pool2 = nn.MaxPool2d(kernel_size=2, stride=2)  # -> 16x16x32
+        
+        # FC Layers: 16 * 16 * 32 = 8192 features after flattening
+        self.fc1 = nn.Linear(32 * 16 * 16, 100)
+        self.fc2 = nn.Linear(100, num_classes)
+
+    def forward(self, x):
+        x = F.relu(self.conv1(x))
+        x = self.pool1(x)
+        x = F.relu(self.conv2(x))
+        x = self.pool2(x)
+        x = x.view(x.size(0), -1)  # Flatten
+        x = F.relu(self.fc1(x))
+        x = self.fc2(x)
+        return x
+
+# CIFAR-10 Classes
+CLASSES = [
+    "airplane", "automobile", "bird", "cat", "deer",
+    "dog", "frog", "horse", "ship", "truck"
+]
+
+# Instantiate and initialize model
+model = CNNClassifier(num_classes=10)
 model.eval()
 
-# Image Preprocessing Pipeline
+# Image Preprocessing matching 64x64 input requirement
 transform = transforms.Compose([
-    transforms.Resize((224, 224)),
+    transforms.Resize((64, 64)),
     transforms.ToTensor(),
-    transforms.Normalize(
-        mean=[0.485, 0.456, 0.406],
-        std=[0.229, 0.224, 0.225]
-    )
+    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
 ])
-
-# Load ImageNet labels
-categories = models.MobileNet_V2_Weights.DEFAULT.meta["categories"]
 
 def predict_image(image_bytes: bytes) -> dict:
     image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
@@ -27,10 +55,10 @@ def predict_image(image_bytes: bytes) -> dict:
     
     with torch.no_grad():
         outputs = model(tensor)
-        probabilities = torch.nn.functional.softmax(outputs[0], dim=0)
-        top_prob, top_catid = torch.topk(probabilities, 1)
+        probabilities = F.softmax(outputs[0], dim=0)
+        top_prob, top_class_id = torch.topk(probabilities, 1)
         
-    class_name = categories[top_catid[0].item()]
+    class_name = CLASSES[top_class_id[0].item()]
     confidence = top_prob[0].item()
     
-    return {"class_name": class_name, "confidence": float(confidence)}
+    return {"predicted_class": class_name, "confidence": float(confidence)}
