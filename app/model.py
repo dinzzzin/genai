@@ -5,7 +5,7 @@ from PIL import Image
 import io
 import torchvision.transforms as transforms
 
-# Define the exact CNN architecture specified in Practice 1
+# Exact CNN architecture specified in Practice 1
 class CNNClassifier(nn.Module):
     def __init__(self, num_classes=10):
         super(CNNClassifier, self).__init__()
@@ -18,7 +18,7 @@ class CNNClassifier(nn.Module):
         self.conv2 = nn.Conv2d(in_channels=16, out_channels=32, kernel_size=3, stride=1, padding=1)
         self.pool2 = nn.MaxPool2d(kernel_size=2, stride=2)  # -> 16x16x32
         
-        # FC Layers: 16 * 16 * 32 = 8192 features after flattening
+        # FC Layers: 16 * 16 * 32 = 8192 features
         self.fc1 = nn.Linear(32 * 16 * 16, 100)
         self.fc2 = nn.Linear(100, num_classes)
 
@@ -38,7 +38,7 @@ CLASSES = [
     "dog", "frog", "horse", "ship", "truck"
 ]
 
-# Instantiate and initialize model
+# Instantiate model
 model = CNNClassifier(num_classes=10)
 model.eval()
 
@@ -50,15 +50,18 @@ transform = transforms.Compose([
 ])
 
 def predict_image(image_bytes: bytes) -> dict:
-    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-    tensor = transform(image).unsqueeze(0)
-    
-    with torch.no_grad():
-        outputs = model(tensor)
-        probabilities = F.softmax(outputs[0], dim=0)
-        top_prob, top_class_id = torch.topk(probabilities, 1)
+    try:
+        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        tensor = transform(image).unsqueeze(0)
         
-    class_name = CLASSES[top_class_id[0].item()]
-    confidence = top_prob[0].item()
-    
-    return {"predicted_class": class_name, "confidence": float(confidence)}
+        with torch.no_grad():
+            outputs = model(tensor)
+            probabilities = F.softmax(outputs[0], dim=0)
+            top_prob, top_class_id = torch.topk(probabilities, 1)
+            
+        class_name = CLASSES[top_class_id[0].item()]
+        confidence = float(top_prob[0].item())
+        
+        return {"predicted_class": class_name, "confidence": confidence}
+    except Exception as e:
+        return {"error": str(e)}
