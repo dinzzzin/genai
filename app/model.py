@@ -1,67 +1,78 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from PIL import Image
 import io
-import torchvision.transforms as transforms
 
-# Exact CNN architecture specified in Practice 1
-class CNNClassifier(nn.Module):
-    def __init__(self, num_classes=10):
-        super(CNNClassifier, self).__init__()
-        # Input: 64x64x3
-        # Conv1: 16 filters, 3x3, stride 1, padding 1 -> 64x64x16
-        self.conv1 = nn.Conv2d(in_channels=3, out_channels=16, kernel_size=3, stride=1, padding=1)
-        self.pool1 = nn.MaxPool2d(kernel_size=2, stride=2)  # -> 32x32x16
+# -------------------------------------------------------------
+# 1. Generator Architecture
+# -------------------------------------------------------------
+class Generator(nn.Module):
+    def __init__(self, latent_dim=100):
+        super(Generator, self).__init__()
+        # FC layer: 100 -> 7 * 7 * 128 (6272)
+        self.fc = nn.Linear(latent_dim, 7 * 7 * 128)
         
-        # Conv2: 32 filters, 3x3, stride 1, padding 1 -> 32x32x32
-        self.conv2 = nn.Conv2d(in_channels=16, out_channels=32, kernel_size=3, stride=1, padding=1)
-        self.pool2 = nn.MaxPool2d(kernel_size=2, stride=2)  # -> 16x16x32
+        # Conv Transpose 1: 128 -> 64, kernel 4, stride 2, padding 1 => 14x14
+        self.conv_trans1 = nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1)
+        self.bn1 = nn.BatchNorm2d(64)
+        self.relu = nn.ReLU()
         
-        # FC Layers: 16 * 16 * 32 = 8192 features
-        self.fc1 = nn.Linear(32 * 16 * 16, 100)
-        self.fc2 = nn.Linear(100, num_classes)
+        # Conv Transpose 2: 64 -> 1, kernel 4, stride 2, padding 1 => 28x28
+        self.conv_trans2 = nn.ConvTranspose2d(64, 1, kernel_size=4, stride=2, padding=1)
+        self.tanh = nn.Tanh()
 
-    def forward(self, x):
-        x = F.relu(self.conv1(x))
-        x = self.pool1(x)
-        x = F.relu(self.conv2(x))
-        x = self.pool2(x)
-        x = x.view(x.size(0), -1)  # Flatten
-        x = F.relu(self.fc1(x))
-        x = self.fc2(x)
+    def forward(self, z):
+        x = self.fc(z)
+        x = x.view(-1, 128, 7, 7)  # Reshape to (BATCH_SIZE, 128, 7, 7)
+        x = self.relu(self.bn1(self.conv_trans1(x)))
+        x = self.tanh(self.conv_trans2(x))
         return x
 
-# CIFAR-10 Classes
-CLASSES = [
-    "airplane", "automobile", "bird", "cat", "deer",
-    "dog", "frog", "horse", "ship", "truck"
-]
-
-# Instantiate model
-model = CNNClassifier(num_classes=10)
-model.eval()
-
-# Image Preprocessing matching 64x64 input requirement
-transform = transforms.Compose([
-    transforms.Resize((64, 64)),
-    transforms.ToTensor(),
-    transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
-])
-
-def predict_image(image_bytes: bytes) -> dict:
-    try:
-        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        tensor = transform(image).unsqueeze(0)
+# -------------------------------------------------------------
+# 2. Discriminator Architecture
+# -------------------------------------------------------------
+class Discriminator(nn.Module):
+    def __init__(self):
+        super(Discriminator, self).__init__()
+        # Conv 1: 1 -> 64, kernel 4, stride 2, padding 1 => 14x14
+        self.conv1 = nn.Conv2d(1, 64, kernel_size=4, stride=2, padding=1)
+        self.lrelu = nn.LeakyReLU(0.2)
         
-        with torch.no_grad():
-            outputs = model(tensor)
-            probabilities = F.softmax(outputs[0], dim=0)
-            top_prob, top_class_id = torch.topk(probabilities, 1)
-            
-        class_name = CLASSES[top_class_id[0].item()]
-        confidence = float(top_prob[0].item())
+        # Conv 2: 64 -> 128, kernel 4, stride 2, padding 1 => 7x7
+        self.conv2 = nn.Conv2d(64, 128, kernel_size=4, stride=2, padding=1)
+        self.bn2 = nn.BatchNorm2d(128)
         
-        return {"predicted_class": class_name, "confidence": confidence}
-    except Exception as e:
-        return {"error": str(e)}
+        # FC Layer: Flatten 128 * 7 * 7 -> 1 (Probability output)
+        self.fc = nn.Linear(128 * 7 * 7, 1)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        x = self.lrelu(self.conv1(x))
+        x = self.lrelu(self.bn2(self.conv2(x)))
+        x = x.view(x.size(0), -1)  # Flatten
+        x = self.sigmoid(self.fc(x))
+        return x
+
+# Instantiate Generator
+generator = Generator(latent_dim=100)
+generator.eval()
+
+def generate_digit_image() -> bytes:
+    """Generates a random hand-written digit image using the GAN generator."""
+    # Sample random noise vector of shape (1, 100)
+    z = torch.randn(1, 100)
+    
+    with torch.no_grad():
+        generated_tensor = generator(z)
+        
+    # Convert output tensor from [-1, 1] (Tanh) to [0, 255] byte format
+    img_tensor = (generated_tensor.squeeze(0).squeeze(0) + 1) / 2.0
+    img_tensor = torch.clamp(img_tensor * 255, 0, 255).byte()
+    
+    # Convert PyTorch Tensor to PIL Image
+    pil_img = Image.fromarray(img_tensor.numpy(), mode="L")
+    
+    # Save to PNG byte stream
+    img_byte_arr = io.BytesIO()
+    pil_img.save(img_byte_arr, format="PNG")
+    return img_byte_arr.getvalue()

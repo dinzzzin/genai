@@ -1,32 +1,18 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException
-from app.model import predict_image
+from fastapi import FastAPI, Response
+from app.model import generate_digit_image
 
 app = FastAPI(
-    title="CNN Image Classification API",
-    description="CIFAR-10 Image Classifier API",
+    title="GAN Digit Generator API",
+    description="MNIST Hand-written Digit Generation API using PyTorch GAN",
     version="1.0.0"
 )
 
 @app.get("/")
 def root():
-    return {"status": "CNN Image Classifier is running"}
+    return {"status": "GAN Digit Generator API is running"}
 
-@app.post("/classify")
-async def classify_image(file: UploadFile = File(...)):
-    if not file.content_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail="File uploaded must be an image.")
-    
-    try:
-        contents = await file.read()
-        result = predict_image(contents)
-        
-        if "error" in result:
-            raise HTTPException(status_code=500, detail=result["error"])
-            
-        return {
-            "filename": file.filename,
-            "predicted_class": result["predicted_class"],
-            "confidence": result["confidence"]
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+@app.post("/generate")
+def generate():
+    """Endpoint to generate a new synthetic handwritten digit image."""
+    image_bytes = generate_digit_image()
+    return Response(content=image_bytes, media_type="image/png")
