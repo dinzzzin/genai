@@ -7,6 +7,8 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app/ ./app/
+COPY weights/ ./weights/
+COPY train.py .
 
 EXPOSE 8000
 
