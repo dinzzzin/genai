@@ -89,6 +89,7 @@ def _tensor_to_png_bytes(img_tensor: torch.Tensor) -> bytes:
     pil_img = Image.fromarray(img_np, mode="RGB")
     buf = io.BytesIO()
     pil_img.save(buf, format="PNG")
+    buf.seek(0)
     return buf.getvalue()
 
 
@@ -118,3 +119,15 @@ def generate_diffusion_image(steps: int = 20) -> bytes:
 
 def generate_ebm_image(steps: int = 30, step_size: float = 0.05) -> bytes:
     """Generates an image via Langevin Dynamics (gradient descent on input x)."""
+    x = torch.randn(1, 3, 32, 32)
+
+    for _ in range(steps):
+        x = x.detach().requires_grad_(True)
+        energy = ebm_model(x).sum()
+        grad_x = torch.autograd.grad(energy, x)[0]
+
+        with torch.no_grad():
+            x = x - 0.5 * step_size * grad_x + math.sqrt(step_size) * torch.randn_like(x)
+            x = torch.clamp(x, -1.0, 1.0)
+
+    return _tensor_to_png_bytes(x)
