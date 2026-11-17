@@ -1,78 +1,120 @@
+import math
+import io
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from PIL import Image
-import io
 
-# -------------------------------------------------------------
-# 1. Generator Architecture
-# -------------------------------------------------------------
-class Generator(nn.Module):
-    def __init__(self, latent_dim=100):
-        super(Generator, self).__init__()
-        # FC layer: 100 -> 7 * 7 * 128 (6272)
-        self.fc = nn.Linear(latent_dim, 7 * 7 * 128)
+# =============================================================
+# 1. Diffusion Model (UNet + Sinusoidal Time Embedding)
+# =============================================================
+class SinusoidalTimeEmbedding(nn.Module):
+    def __init__(self, dim: int):
+        super().__init__()
+        self.dim = dim
+
+    def forward(self, t: torch.Tensor) -> torch.Tensor:
+        half_dim = self.dim // 2
+        emb = math.log(10000) / (half_dim - 1)
+        emb = torch.exp(torch.arange(half_dim, device=t.device, dtype=torch.float32) * -emb)
+        emb = t.float()[:, None] * emb[None, :]
+        return torch.cat([torch.sin(emb), torch.cos(emb)], dim=-1)
+
+
+class SimpleDiffusionUNet(nn.Module):
+    def __init__(self, time_dim: int = 32):
+        super().__init__()
+        self.time_mlp = nn.Sequential(
+            SinusoidalTimeEmbedding(time_dim),
+            nn.Linear(time_dim, 64),
+            nn.SiLU()
+        )
+        # Encoder (Downsampling)
+        self.conv1 = nn.Conv2d(3, 32, kernel_size=3, padding=1)
+        self.down1 = nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=1)  # 32x32 -> 16x16
         
-        # Conv Transpose 1: 128 -> 64, kernel 4, stride 2, padding 1 => 14x14
-        self.conv_trans1 = nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1)
-        self.bn1 = nn.BatchNorm2d(64)
-        self.relu = nn.ReLU()
+        # Bottleneck
+        self.bot = nn.Conv2d(64, 64, kernel_size=3, padding=1)
         
-        # Conv Transpose 2: 64 -> 1, kernel 4, stride 2, padding 1 => 28x28
-        self.conv_trans2 = nn.ConvTranspose2d(64, 1, kernel_size=4, stride=2, padding=1)
-        self.tanh = nn.Tanh()
+        # Decoder (Upsampling)
+        self.up1 = nn.ConvTranspose2d(64, 32, kernel_size=4, stride=2, padding=1)  # 16x16 -> 32x32
+        self.out = nn.Conv2d(64, 3, kernel_size=3, padding=1)  # Concat skip connection (32 + 32)
 
-    def forward(self, z):
-        x = self.fc(z)
-        x = x.view(-1, 128, 7, 7)  # Reshape to (BATCH_SIZE, 128, 7, 7)
-        x = self.relu(self.bn1(self.conv_trans1(x)))
-        x = self.tanh(self.conv_trans2(x))
-        return x
+    def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        t_emb = self.time_mlp(t)[:, :, None, None]
+        
+        h1 = F.silu(self.conv1(x))
+        h2 = F.silu(self.down1(h1) + t_emb)
+        h_bot = F.silu(self.bot(h2))
+        
+        u1 = F.silu(self.up1(h_bot))
+        return self.out(torch.cat([u1, h1], dim=1))
 
-# -------------------------------------------------------------
-# 2. Discriminator Architecture
-# -------------------------------------------------------------
-class Discriminator(nn.Module):
+
+# =============================================================
+# 2. Energy-Based Model (EBM + Langevin Dynamics Sampling)
+# =============================================================
+class EnergyModel(nn.Module):
     def __init__(self):
-        super(Discriminator, self).__init__()
-        # Conv 1: 1 -> 64, kernel 4, stride 2, padding 1 => 14x14
-        self.conv1 = nn.Conv2d(1, 64, kernel_size=4, stride=2, padding=1)
-        self.lrelu = nn.LeakyReLU(0.2)
-        
-        # Conv 2: 64 -> 128, kernel 4, stride 2, padding 1 => 7x7
-        self.conv2 = nn.Conv2d(64, 128, kernel_size=4, stride=2, padding=1)
-        self.bn2 = nn.BatchNorm2d(128)
-        
-        # FC Layer: Flatten 128 * 7 * 7 -> 1 (Probability output)
-        self.fc = nn.Linear(128 * 7 * 7, 1)
-        self.sigmoid = nn.Sigmoid()
+        super().__init__()
+        # Maps 3x32x32 CIFAR-10 image to a scalar energy E(x)
+        self.net = nn.Sequential(
+            nn.Conv2d(3, 32, kernel_size=3, stride=2, padding=1),   # -> 16x16
+            nn.SiLU(),
+            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),  # -> 8x8
+            nn.SiLU(),
+            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1), # -> 4x4
+            nn.SiLU(),
+            nn.Flatten(),
+            nn.Linear(128 * 4 * 4, 1)
+        )
 
-    def forward(self, x):
-        x = self.lrelu(self.conv1(x))
-        x = self.lrelu(self.bn2(self.conv2(x)))
-        x = x.view(x.size(0), -1)  # Flatten
-        x = self.sigmoid(self.fc(x))
-        return x
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
 
-# Instantiate Generator
-generator = Generator(latent_dim=100)
-generator.eval()
 
-def generate_digit_image() -> bytes:
-    """Generates a random hand-written digit image using the GAN generator."""
-    # Sample random noise vector of shape (1, 100)
-    z = torch.randn(1, 100)
-    
+# Instantiate models
+diffusion_model = SimpleDiffusionUNet()
+diffusion_model.eval()
+
+ebm_model = EnergyModel()
+ebm_model.eval()
+
+
+def _tensor_to_png_bytes(img_tensor: torch.Tensor) -> bytes:
+    """Helper to convert [-1, 1] (1, 3, 32, 32) tensor to PNG bytes."""
+    img = (img_tensor.squeeze(0).detach().cpu() + 1.0) / 2.0
+    img = torch.clamp(img * 255.0, 0, 255).byte()
+    img_np = img.permute(1, 2, 0).numpy()  # (H, W, C)
+    pil_img = Image.fromarray(img_np, mode="RGB")
+    buf = io.BytesIO()
+    pil_img.save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def generate_diffusion_image(steps: int = 20) -> bytes:
+    """Runs reverse diffusion sampling starting from Gaussian noise."""
+    x = torch.randn(1, 3, 32, 32)
+    betas = torch.linspace(1e-4, 0.02, steps)
+    alphas = 1.0 - betas
+    alphas_cumprod = torch.cumprod(alphas, dim=0)
+
     with torch.no_grad():
-        generated_tensor = generator(z)
-        
-    # Convert output tensor from [-1, 1] (Tanh) to [0, 255] byte format
-    img_tensor = (generated_tensor.squeeze(0).squeeze(0) + 1) / 2.0
-    img_tensor = torch.clamp(img_tensor * 255, 0, 255).byte()
-    
-    # Convert PyTorch Tensor to PIL Image
-    pil_img = Image.fromarray(img_tensor.numpy(), mode="L")
-    
-    # Save to PNG byte stream
-    img_byte_arr = io.BytesIO()
-    pil_img.save(img_byte_arr, format="PNG")
-    return img_byte_arr.getvalue()
+        for step in reversed(range(steps)):
+            t = torch.tensor([step], dtype=torch.long)
+            pred_noise = diffusion_model(x, t)
+            
+            alpha_t = alphas[step]
+            alpha_bar_t = alphas_cumprod[step]
+            beta_t = betas[step]
+            
+            noise = torch.randn_like(x) if step > 0 else torch.zeros_like(x)
+            x = (1 / torch.sqrt(alpha_t)) * (
+                x - ((1 - alpha_t) / torch.sqrt(1 - alpha_bar_t)) * pred_noise
+            ) + torch.sqrt(beta_t) * noise
+
+    return _tensor_to_png_bytes(x)
+
+
+def generate_ebm_image(steps: int = 30, step_size: float = 0.05) -> bytes:
+    """Generates an image via Langevin Dynamics (gradient descent on input x)."""
